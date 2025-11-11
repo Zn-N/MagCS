@@ -6,7 +6,6 @@ import pandas as pd
 class MagneticPrecipitationCalculator:
     def __init__(self):
         # 固定参数
-        self.water_density = 1050  # kg/m³
         self.dynamic_viscosity = 0.00114  # Pa.s
         self.gravity = 9.81  # m/s²
         self.resistance_coefficient = 0.5
@@ -15,6 +14,9 @@ class MagneticPrecipitationCalculator:
         self.motor_condition_factor = 1.2
         self.reducer_efficiency = 0.95
         self.bearing_efficiency = 0.99
+
+        # 电机功率选型列表
+        self.motor_power_options = [0.37, 0.55, 0.75, 1.1, 1.5, 2.2, 3, 4, 5.5, 7.5, 11, 15, 22]
 
     def check_water_quality_feasibility(self, tp_in, tp_out, ss_in, ss_out):
         """第一步：判断水质处理效果是否能实现"""
@@ -65,9 +67,25 @@ class MagneticPrecipitationCalculator:
         q_max = q0 * variation_coefficient  # 单套设备最大处理量
         return q0, q_max
 
-    def forward_calculate_t1_parameters(self, ss_in, flow_rate, construction_type, pool_shape, d1=None, v1=None):
-        """正向计算：计算T1反应池参数"""
+    def select_motor_power(self, calculated_power):
+        """电机功率选型"""
+        if calculated_power < 2.5:
+            required_power = calculated_power * 1.2
+        else:
+            required_power = calculated_power + 0.5
+
+        # 向上取整到最近的电机功率选项
+        for power in self.motor_power_options:
+            if power >= required_power:
+                return power
+        return self.motor_power_options[-1]  # 如果超过最大值，返回最大功率
+
+    def calculate_t1_parameters(self, ss_in, flow_rate, construction_type, pool_shape, d1=None, v1=None):
+        """T1反应池参数计算"""
         results = {}
+
+        # 水的密度
+        water_density = 1050  # kg/m³
 
         # ① 确定停留时间 t1
         if ss_in >= 150:
@@ -103,64 +121,88 @@ class MagneticPrecipitationCalculator:
         results['h2'] = h2
 
         # 调用通用计算函数完成剩余计算
-        self._calculate_common_parameters(results, ss_in, flow_rate, construction_type, pool_shape, d1, v1)
+        self._calculate_common_parameters(results, ss_in, flow_rate, construction_type, pool_shape,
+                                          water_density, d1, v1, "T1")
 
         return results
 
-    def reverse_calculate_t1_parameters(self, ss_in, flow_rate, construction_type, pool_shape, l, w, h2, d1=None,
-                                        v1=None):
-        """反向计算：根据池体尺寸反推参数"""
+    def calculate_t2_parameters(self, ss_in, flow_rate, construction_type, pool_shape, d1=None, v1=None):
+        """T2反应池参数计算"""
         results = {}
 
-        # 根据池体形状计算体积和当量直径
-        if pool_shape == "圆形":
-            # 圆形池体：l作为直径D
-            D = l
-            V1 = (math.pi * (D / 2) ** 2) * h2
-            results['D'] = D
-            results['l'] = None
-            results['w'] = None
+        # 水的密度
+        water_density = 1150  # kg/m³
+
+        # ① 确定停留时间 t1
+        if ss_in >= 130:
+            t1 = 120
+        elif ss_in > 100:
+            t1 = 110
+        elif ss_in > 20:
+            t1 = 100
         else:
-            # 矩形池体
-            V1 = l * w * h2
-            D = math.sqrt((4 * l * w) / math.pi)
-            results['D'] = D
-            results['l'] = l
-            results['w'] = w
-
-        results['V1'] = V1
-        results['h2'] = h2
-
-        # 反推停留时间 t1
-        t1 = (V1 * 24 * 3600) / flow_rate
+            t1 = 90
         results['t1'] = t1
 
+        # ② 计算反应池体积 V1
+        V1 = (flow_rate * t1) / (24 * 3600)
+        results['V1'] = V1
+
+        # ③ 反应池尺寸确认
+        if pool_shape == "圆形":
+            # 圆形池体
+            D = (V1 / 1.5) ** (1 / 3)  # h2/D = 1.5
+            h2 = 1.5 * D
+            l = None
+            w = None
+        else:
+            # 矩形池体
+            l = (V1 / 1.5) ** (1 / 3)  # l=w, h2/D=1.5
+            w = l
+            D = math.sqrt((4 * l * w) / math.pi)
+            h2 = 1.5 * D
+        results['D'] = D
+        results['l'] = l
+        results['w'] = w
+        results['h2'] = h2
+
         # 调用通用计算函数完成剩余计算
-        self._calculate_common_parameters(results, ss_in, flow_rate, construction_type, pool_shape, d1, v1)
+        self._calculate_common_parameters(results, ss_in, flow_rate, construction_type, pool_shape,
+                                          water_density, d1, v1, "T2")
 
         return results
 
-    def _calculate_common_parameters(self, results, ss_in, flow_rate, construction_type, pool_shape, d1=None, v1=None):
-        """通用参数计算（正向和反向计算共用）"""
+    def _calculate_common_parameters(self, results, ss_in, flow_rate, construction_type, pool_shape,
+                                     water_density, d1=None, v1=None, reactor_type="T1"):
+        """通用参数计算（T1和T2反应池共用）"""
         # 池体超高 h1
         h1 = 0.3 if construction_type == "钢结构" else 0.5
         results['h1'] = h1
         results['h_total'] = h1 + results['h2']
 
-        # ④ 搅拌桨叶外缘线速度 v1
+        # 搅拌桨叶外缘线速度 v1
         if v1 is None:
-            # 如果用户没有提供v1，则根据SS值自动确定
-            if 50 <= ss_in < 250:
-                v1 = 4.3
-            elif 250 <= ss_in < 400:
-                v1 = 4.4
-            elif 400 <= ss_in <= 500:
-                v1 = 4.5
+            if reactor_type == "T1":
+                # T1反应池的v1取值
+                if 50 <= ss_in < 250:
+                    v1 = 4.3
+                elif 250 <= ss_in < 400:
+                    v1 = 4.4
+                elif 400 <= ss_in <= 500:
+                    v1 = 4.5
+                else:
+                    v1 = 4.2  # 默认值
             else:
-                v1 = 4.2  # 默认值
+                # T2反应池的v1取值（更新后的规则）
+                if ss_in <= 250:
+                    v1 = 3.5
+                elif ss_in <= 400:
+                    v1 = 3.8
+                else:
+                    v1 = 4.1
         results['v1'] = v1
 
-        # ⑤ 搅拌直径 d1
+        # 搅拌直径 d1
         if d1 is None:
             # 如果用户没有提供d1，则根据SS值自动确定
             if ss_in >= 500:
@@ -177,7 +219,7 @@ class MagneticPrecipitationCalculator:
 
         results['d1'] = d1
 
-        # 复核 S1/S < 0.2
+        # 复核 S1/S 范围（改回小于0.2）
         if pool_shape == "圆形":
             S = (math.pi * results['D'] ** 2) / 4
         else:
@@ -186,7 +228,20 @@ class MagneticPrecipitationCalculator:
         S1 = (math.pi * d1 ** 2) / 4
         s1_s_ratio = S1 / S
         results['S1_S_ratio'] = s1_s_ratio
-        results['S1_S_warning'] = s1_s_ratio >= 0.2
+        results['S1_S_in_range'] = s1_s_ratio < 0.25
+
+        # 搅拌器桨叶宽度 b (更新后的规则)
+        if d1 <= 0.5:
+            b = 0.10
+        elif d1 < 1:
+            b = 0.15
+        elif d1 < 1.6:
+            b = 0.20
+        elif d1 < 2:
+            b = 0.25
+        else:
+            b = 0.30
+        results['b'] = b
 
         # ⑥ 搅拌功率 N1
         # 转速 n1
@@ -202,22 +257,11 @@ class MagneticPrecipitationCalculator:
         e = 2 if h2_D_ratio > 1.3 else 1
         results['e'] = e
 
-        # 搅拌器桨叶宽度 b
-        if d1 <= 0.5:
-            b = 0.10
-        elif d1 < 1:
-            b = 0.15
-        elif d1 < 1.6:
-            b = 0.20
-        else:
-            b = 0.25
-        results['b'] = b
-
         # 搅拌器半径 R1
         R1 = 0.5 * d1
 
         # 搅拌功率 N1
-        N1 = (self.resistance_coefficient * self.water_density * (w1 ** 3) *
+        N1 = (self.resistance_coefficient * water_density * (w1 ** 3) *
               self.paddle_blades * e * b * (R1 ** 4) * math.sin(math.radians(self.paddle_angle))) / (408 * self.gravity)
         results['N1'] = N1
 
@@ -225,16 +269,27 @@ class MagneticPrecipitationCalculator:
         Na1 = (self.motor_condition_factor * N1) / (self.reducer_efficiency * self.bearing_efficiency)
         results['Na1'] = Na1
 
+        # 电动机选型功率
+        selected_motor_power = self.select_motor_power(Na1)
+        results['selected_motor_power'] = selected_motor_power
+
         # ⑧ 速度梯度 G1 复核
         Q_max1 = flow_rate / (24 * 3600)  # m³/s
         G1 = math.sqrt((1000 * N1) / (self.dynamic_viscosity * Q_max1 * results['t1']))
         results['G1'] = G1
-        results['G1_in_range'] = 300 <= G1 <= 1000
+
+        # 根据反应池类型设置G1的正常范围
+        if reactor_type == "T1":
+            results['G1_in_range'] = 250 <= G1 <= 400
+            results['G1_range'] = (250, 400)
+        else:
+            results['G1_in_range'] = 200 <= G1 <= 300
+            results['G1_range'] = (200, 300)
 
 
 def main():
     st.set_page_config(page_title="磁沉淀工艺计算系统", layout="wide")
-    st.title("🧲 磁沉淀第一段工艺计算系统")
+    st.title("🧲 磁沉淀工艺计算系统")
 
     calculator = MagneticPrecipitationCalculator()
 
@@ -248,6 +303,13 @@ def main():
 
     # 侧边栏输入参数
     st.sidebar.header("📋 输入参数")
+
+    # 反应池类型选择
+    reactor_type = st.sidebar.selectbox(
+        "反应池类型",
+        ["T1反应池", "T2反应池"],
+        help="选择要计算的反应池类型"
+    )
 
     # 计算模式选择
     calculation_mode = st.sidebar.selectbox(
@@ -359,24 +421,34 @@ def main():
         with col4:
             st.metric(f"计算使用的流量 ({flow_display_name})", f"{flow_rate:.2f} m³/d")
 
-        # 第四步：计算T1反应池参数
-        st.header("第四步：T1反应池参数计算")
+        # 第四步：计算反应池参数
+        st.header(f"第四步：{reactor_type}参数计算")
 
         if calculation_mode == "正向计算":
-            st.info("🔍 正向计算模式：根据水质参数计算池体尺寸")
-            t1_results = calculator.forward_calculate_t1_parameters(
-                ss_in, flow_rate, construction_type, pool_shape
-            )
+            st.info(f"🔍 正向计算模式：根据水质参数计算{reactor_type}池体尺寸")
+            if reactor_type == "T1反应池":
+                t1_results = calculator.calculate_t1_parameters(
+                    ss_in, flow_rate, construction_type, pool_shape
+                )
+            else:
+                t1_results = calculator.calculate_t2_parameters(
+                    ss_in, flow_rate, construction_type, pool_shape
+                )
         else:
-            st.info("🔍 反向计算模式：根据池体尺寸验证水力停留时间")
+            st.info(f"🔍 反向计算模式：根据池体尺寸验证{reactor_type}水力停留时间")
             # 确保l和h2有值
             if l is None or h2 is None:
                 st.error("❌ 反向计算需要输入池体尺寸参数")
                 st.stop()
 
-            t1_results = calculator.reverse_calculate_t1_parameters(
-                ss_in, flow_rate, construction_type, pool_shape, l, w, h2
-            )
+            if reactor_type == "T1反应池":
+                t1_results = calculator.calculate_t1_parameters(
+                    ss_in, flow_rate, construction_type, pool_shape, l, w, h2
+                )
+            else:
+                t1_results = calculator.calculate_t2_parameters(
+                    ss_in, flow_rate, construction_type, pool_shape, l, w, h2
+                )
 
         # 保存计算结果到会话状态
         st.session_state.t1_results = t1_results
@@ -390,15 +462,17 @@ def main():
         st.session_state.flow_display_name = flow_display_name  # 保存流量显示名称
         st.session_state.l = l  # 保存l值
         st.session_state.w = w  # 保存w值
+        st.session_state.reactor_type = reactor_type  # 保存反应池类型
 
         # 检查G1是否在范围内
+        g1_min, g1_max = t1_results['G1_range']
         if not t1_results['G1_in_range']:
             st.session_state.show_adjustment = True
-            st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: 300-1000 s⁻¹)")
+            st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: {g1_min}-{g1_max} s⁻¹)")
             st.info("💡 您可以手动调整搅拌参数来优化速度梯度")
         else:
             st.session_state.show_adjustment = False
-            st.success("✅ 速度梯度 G1 在正常范围内 (300-1000 s⁻¹)")
+            st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
 
         # 显示计算结果
         display_results()
@@ -406,7 +480,8 @@ def main():
     # 如果计算结果已存在且需要调整，显示调整界面
     if st.session_state.calculation_completed and st.session_state.show_adjustment:
         st.header("🔄 搅拌参数调整")
-        st.info("请调整以下参数以使速度梯度 G1 进入正常范围 (300-1000 s⁻¹)")
+        g1_min, g1_max = st.session_state.t1_results['G1_range']
+        st.info(f"请调整以下参数以使速度梯度 G1 进入正常范围 ({g1_min}-{g1_max} s⁻¹)")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -421,21 +496,36 @@ def main():
 
         if st.button("重新计算", type="primary"):
             # 使用调整后的参数重新计算
-            if st.session_state.calculation_mode == "正向计算":
-                adjusted_results = calculator.forward_calculate_t1_parameters(
-                    ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape, adjusted_d1,
-                    adjusted_v1
-                )
+            if st.session_state.reactor_type == "T1反应池":
+                if st.session_state.calculation_mode == "正向计算":
+                    adjusted_results = calculator.calculate_t1_parameters(
+                        ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape, adjusted_d1,
+                        adjusted_v1
+                    )
+                else:
+                    adjusted_results = calculator.calculate_t1_parameters(
+                        ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape,
+                        st.session_state.l, st.session_state.w, st.session_state.t1_results['h2'], adjusted_d1,
+                        adjusted_v1
+                    )
             else:
-                adjusted_results = calculator.reverse_calculate_t1_parameters(
-                    ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape,
-                    st.session_state.l, st.session_state.w, st.session_state.t1_results['h2'], adjusted_d1, adjusted_v1
-                )
+                if st.session_state.calculation_mode == "正向计算":
+                    adjusted_results = calculator.calculate_t2_parameters(
+                        ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape, adjusted_d1,
+                        adjusted_v1
+                    )
+                else:
+                    adjusted_results = calculator.calculate_t2_parameters(
+                        ss_in, st.session_state.flow_rate, construction_type, st.session_state.pool_shape,
+                        st.session_state.l, st.session_state.w, st.session_state.t1_results['h2'], adjusted_d1,
+                        adjusted_v1
+                    )
 
             # 更新会话状态
             st.session_state.t1_results = adjusted_results
 
             # 检查调整后的G1
+            g1_min, g1_max = adjusted_results['G1_range']
             if adjusted_results['G1_in_range']:
                 st.session_state.show_adjustment = False
                 st.success(f"✅ 调整成功！速度梯度 G1 现在在正常范围内: {adjusted_results['G1']:.2f} s⁻¹")
@@ -458,9 +548,10 @@ def display_results():
     flow_selection = st.session_state.flow_selection
     l = st.session_state.l
     w = st.session_state.w
+    reactor_type = st.session_state.reactor_type
 
     # 显示主要结果
-    st.subheader("主要计算结果")
+    st.subheader(f"{reactor_type}主要计算结果")
 
     # 分列显示结果
     col1, col2, col3 = st.columns(3)
@@ -490,6 +581,7 @@ def display_results():
         st.metric("搅拌转速 n1", f"{t1_results['n1']:.2f} r/min")
         st.metric("搅拌功率 N1", f"{t1_results['N1']:.4f} kW")
         st.metric("电动机功率 Na1", f"{t1_results['Na1']:.4f} kW")
+        st.metric("电动机选型功率", f"{t1_results['selected_motor_power']} kW")
 
     # 显示详细结果
     st.subheader("详细计算结果")
@@ -504,18 +596,19 @@ def display_results():
         st.write(f"速度梯度 G1: {t1_results['G1']:.2f} s⁻¹")
 
         # 速度梯度检查
+        g1_min, g1_max = t1_results['G1_range']
         if t1_results['G1_in_range']:
-            st.success("✅ 速度梯度 G1 在正常范围内 (300-1000 s⁻¹)")
+            st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
         else:
             st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹")
 
     with col2:
         st.write("**复核参数**")
         st.write(f"S1/S 比值: {t1_results['S1_S_ratio']:.4f}")
-        if t1_results['S1_S_warning']:
-            st.error(f"❌ S1/S 比值不小于 0.2: {t1_results['S1_S_ratio']:.4f}")
+        if t1_results['S1_S_in_range']:
+            st.success("✅ S1/S 比值满足要求 (< 0.25)")
         else:
-            st.success("✅ S1/S 比值满足要求 (< 0.2)")
+            st.error(f"❌ S1/S 比值不小于 0.25: {t1_results['S1_S_ratio']:.4f}")
 
         st.write(f"h2/D 比值: {t1_results['h2'] / t1_results['D']:.3f}")
 
@@ -527,16 +620,16 @@ def display_results():
     st.subheader("结果汇总")
     summary_data = {
         '参数': [
-            '计算模式', '流量选择',
+            '反应池类型', '计算模式', '流量选择',
             '单套设备处理量 Q0 (m³/d)', '单套设备最大处理量 Qmax (m³/d)', '计算使用流量 (m³/d)',
             '水力停留时间 t1 (s)', '反应池体积 V1 (m³)', '池体当量直径 D (m)',
             '池体长度 l (m)', '池体宽度 w (m)', '有效高度 h2 (m)', '池体超高 h1 (m)',
             '池体总高 h总 (m)', '搅拌桨叶线速度 v1 (m/s)', '搅拌转速 n1 (r/min)',
             '搅拌直径 d1 (m)', '搅拌角速度 w1 (rad/s)', '搅拌功率 N1 (kW)',
-            '搅拌器桨叶宽度 b (m)', '电动机功率 Na1 (kW)', '速度梯度 G1 (s⁻¹)'
+            '搅拌器桨叶宽度 b (m)', '电动机功率 Na1 (kW)', '电动机选型功率 (kW)', '速度梯度 G1 (s⁻¹)'
         ],
         '数值': [
-            calculation_mode, flow_selection,
+            reactor_type, calculation_mode, flow_selection,
             f"{q0:.2f}", f"{q_max:.2f}", f"{flow_rate:.2f}",
             f"{t1_results['t1']:.2f}", f"{t1_results['V1']:.3f}", f"{t1_results['D']:.3f}",
             f"{t1_results['l']:.3f}" if t1_results['l'] else ("N/A" if pool_shape == "圆形" else f"{l:.3f}"),
@@ -546,7 +639,7 @@ def display_results():
             f"{t1_results['n1']:.2f}", f"{t1_results['d1']:.3f}",
             f"{t1_results['w1']:.4f}", f"{t1_results['N1']:.4f}",
             f"{t1_results['b']:.3f}", f"{t1_results['Na1']:.4f}",
-            f"{t1_results['G1']:.2f}"
+            f"{t1_results['selected_motor_power']}", f"{t1_results['G1']:.2f}"
         ]
     }
 
