@@ -418,7 +418,7 @@ class MagneticPrecipitationCalculator:
         friction_coefficient = 0.5
         efficiency_scraper = 0.8
 
-        P_scraper = (9.81 * Q_sludge_accumulated * density_sludge *
+        P_scraper = (9.81 * Q_sludge_dry * density_sludge *
                      friction_coefficient * 1000) / (60 * r_scraper)
 
         N_scraper = (2 / 3 * v_scraper * P_scraper) / (60000 * efficiency_scraper)
