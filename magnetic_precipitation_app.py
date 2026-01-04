@@ -58,6 +58,303 @@ class MagneticPrecipitationCalculator:
         # 电机功率选型列表
         self.motor_power_options = [0.37, 0.55, 0.75, 1.1, 1.5, 2.2, 3, 4, 5.5, 7.5, 11, 15, 22]
 
+    # ====================== 新增：加药系统计算方法 ======================
+    def calculate_dosing_system(self, flow_rate, ss_in, tp_in, tp_out, construction_type,
+                                pac_type="干粉药剂", pam_concentration=0.15,
+                                dosing_system_type="全新设计", za=1):
+        """
+        计算加药系统参数
+        参数说明：
+        - flow_rate: 单套设备处理量 (m³/d)
+        - ss_in: 进水SS浓度 (mg/L)
+        - tp_in: 进水TP值 (mg/L)
+        - tp_out: 出水TP值 (mg/L)
+        - construction_type: 建设形式 ("钢结构"/"土建")
+        - pac_type: PAC药剂形式 ("水剂"/"干粉药剂")
+        - pam_concentration: PAM配置浓度 (%)
+        - dosing_system_type: 加药系统类型 ("全新设计"/"验证设计")
+        - za: PAC药剂稀释倍数
+        """
+        results = {}
+        adjustment_log = []
+
+        # 5.1 PAC药剂投加计算
+        # 5.1.1 PAC加药量计算
+        # ① 理论经验值
+        if ss_in <= 100:
+            q_a_theory = 30  # ppm (mg/L)
+        elif ss_in <= 500:
+            q_a_theory = 60  # ppm (mg/L)
+        elif ss_in <= 1000:
+            q_a_theory = 110  # ppm (mg/L)
+        else:
+            q_a_theory = 200  # ppm (mg/L)
+
+        results['q_a_theory'] = q_a_theory
+
+        # ② 按除磷量计算
+        # AL³⁺需求量
+        q_al3 = (tp_in - tp_out) * 0.87 * 2
+        results['q_al3'] = q_al3
+
+        # AL₂O₃需求量
+        q_al2o3 = (q_al3 * 102) / 54
+        results['q_al2o3'] = q_al2o3
+
+        # AL₂O₃加药量
+        if pac_type == "水剂":
+            n_al2o3 = 0.10  # 10%含量
+        else:  # 干粉药剂
+            n_al2o3 = 0.30  # 30%含量
+
+        q_a_phosphorus = q_al2o3 / n_al2o3
+        results['q_a_phosphorus'] = q_a_phosphorus
+
+        # ③ 判断依据
+        if q_a_phosphorus >= q_a_theory:
+            q_a = q_a_phosphorus
+            results['q_a_selection'] = "按除磷投加量"
+        else:
+            q_a = q_a_theory
+            results['q_a_selection'] = "按理论投加量"
+
+        results['q_a'] = q_a
+
+        # 5.1.2 PAC加药泵理论流量
+        if pac_type == "干粉药剂":
+            n_a_pump = 0.10  # 10%配置浓度
+        else:  # 水剂
+            n_a_pump = 1  # 原液投加
+
+        Q_a_pump_theory = (flow_rate * q_a * za) / (24 * n_a_pump * 1000)
+        results['Q_a_pump_theory'] = Q_a_pump_theory
+
+        # 选泵流量（按80%量程最优工况）
+        Q_a_pump_selected = Q_a_pump_theory / 0.8
+        results['Q_a_pump_selected'] = Q_a_pump_selected
+
+        # 5.1.3 PAC制备设备设计
+        # 成本优先：8小时存药时间
+        Va_cost = 1000 * Q_a_pump_theory * 8
+        # 运行稳定优先：12小时存药时间
+        Va_stable = 1000 * Q_a_pump_theory * 12
+
+        results['Va_cost'] = Va_cost
+        results['Va_stable'] = Va_stable
+
+        # 推荐设备容积
+        standard_volumes = [3000, 5000, 7000]  # 3, 5, 7立方
+
+        # 找到最接近的标准容积
+        if Va_cost <= 3000:
+            Va_recommended_cost = 3000
+        elif Va_cost <= 5000:
+            Va_recommended_cost = 5000
+        else:
+            Va_recommended_cost = 7000
+
+        if Va_stable <= 3000:
+            Va_recommended_stable = 3000
+        elif Va_stable <= 5000:
+            Va_recommended_stable = 5000
+        else:
+            Va_recommended_stable = 7000
+
+        # 综合考虑：如果两者推荐不同，取中间值
+        if Va_recommended_cost == Va_recommended_stable:
+            Va_recommended = Va_recommended_cost
+        else:
+            # 取中间规格
+            volumes = sorted([Va_recommended_cost, Va_recommended_stable])
+            Va_recommended = volumes[1] if len(volumes) > 1 else volumes[0]
+
+        results['Va_recommended'] = Va_recommended
+
+        # 5.2 磁粉投加
+        # 5.2.2 运行时磁粉补充量
+        Q_magnetic = 5 * flow_rate / 1000  # kg/d
+        results['Q_magnetic_daily'] = Q_magnetic
+
+        # 建议投加次数
+        dosing_times_options = [2, 4]
+        dosing_schedule = {}
+        for times in dosing_times_options:
+            single_dose = Q_magnetic / times
+            dosing_schedule[times] = single_dose
+
+        results['dosing_schedule'] = dosing_schedule
+        results['recommended_times'] = 4  # 优先建议4次
+
+        # 5.3 PAM药剂投加
+        # 5.3.1 PAM加药量
+        if ss_in <= 100:
+            q_m_theory = 2  # ppm (mg/L)
+        elif ss_in <= 500:
+            q_m_theory = 5  # ppm (mg/L)
+        elif ss_in <= 1000:
+            q_m_theory = 7  # ppm (mg/L)
+        else:
+            q_m_theory = 10  # ppm (mg/L)
+
+        results['q_m_theory'] = q_m_theory
+
+        # 5.3.2 PAM加药泵选型
+        # PAM配置浓度，默认0.15%
+        n_m_pump = pam_concentration / 100  # 转换为小数
+
+        Q_m_pump_theory = (flow_rate * q_m_theory) / (24 * n_m_pump * 1000)
+        results['Q_m_pump_theory'] = Q_m_pump_theory
+
+        # 选泵流量（按80%量程最优工况）
+        Q_m_pump_selected = Q_m_pump_theory / 0.8
+        results['Q_m_pump_selected'] = Q_m_pump_selected
+
+        # 5.3.3 PAM制备设备选型
+        # 配置能力需要大于理论流量
+        min_capacity = Q_m_pump_theory
+        results['min_pam_capacity'] = min_capacity
+
+        # 标准设备容量示例（单位：L/h）
+        standard_pam_capacities = [50, 100, 200, 300, 500, 1000]
+        recommended_capacity = None
+        for capacity in standard_pam_capacities:
+            if capacity > min_capacity:
+                recommended_capacity = capacity
+                break
+
+        if recommended_capacity is None:
+            recommended_capacity = standard_pam_capacities[-1]  # 取最大值
+
+        results['recommended_pam_capacity'] = recommended_capacity
+
+        # 汇总信息
+        summary = {
+            'PAC系统': {
+                '药剂形式': pac_type,
+                '理论投加量': f"{q_a_theory} mg/L",
+                '除磷计算投加量': f"{q_a_phosphorus:.2f} mg/L",
+                '最终投加量': f"{q_a:.2f} mg/L",
+                '理论泵流量': f"{Q_a_pump_theory:.2f} L/h",
+                '选型泵流量': f"{Q_a_pump_selected:.2f} L/h",
+                '推荐设备容积': f"{Va_recommended / 1000:.1f} m³"
+            },
+            '磁粉系统': {
+                '日补充量': f"{Q_magnetic:.2f} kg/d",
+                '建议投加次数': f"{results['recommended_times']}次/天",
+                '单次投加量': f"{dosing_schedule[results['recommended_times']]:.2f} kg/次"
+            },
+            'PAM系统': {
+                '理论投加量': f"{q_m_theory} mg/L",
+                '配置浓度': f"{pam_concentration}%",
+                '理论泵流量': f"{Q_m_pump_theory:.2f} L/h",
+                '选型泵流量': f"{Q_m_pump_selected:.2f} L/h",
+                '最小配置能力': f"{min_capacity:.2f} L/h",
+                '推荐设备容量': f"{recommended_capacity} L/h"
+            }
+        }
+
+        results['summary'] = summary
+        results['adjustment_log'] = adjustment_log
+
+        return results
+
+    def calculate_magnetic_powder_first_dose(self, pool_volumes, dosing_system_type="全新设计"):
+        """
+        计算首次磁粉补充量
+        参数：
+        - pool_volumes: 字典，包含各池体体积
+        - dosing_system_type: 加药系统类型 ("全新设计"/"验证设计")
+        """
+        results = {}
+
+        # 验证输入参数
+        if not isinstance(pool_volumes, dict):
+            results['error'] = "池体体积参数格式错误，应为字典"
+            return results
+
+        # 计算沉淀池体积（如果提供了参数）
+        V_sed = pool_volumes.get('sedimentation')
+        if V_sed is None:
+            results['error'] = "需要沉淀池体积参数"
+            return results
+
+        # 确保沉淀池体积是数值类型
+        try:
+            V_sed = float(V_sed)
+            if V_sed <= 0:
+                results['error'] = f"沉淀池体积必须大于0，当前值: {V_sed}"
+                return results
+        except (ValueError, TypeError):
+            results['error'] = f"沉淀池体积格式错误: {V_sed}"
+            return results
+
+        # 计算总反应体积
+        V_total_reaction = V_sed  # 初始值包含沉淀池
+
+        if dosing_system_type == "全新设计":
+            # 全新设计：单级絮凝池 + T3 + 沉淀池
+            V_single = pool_volumes.get('single')
+            V_t3 = pool_volumes.get('t3')
+
+            if V_single is None or V_t3 is None:
+                results['error'] = "全新设计需要单级絮凝池和T3反应池体积参数"
+                return results
+
+            # 验证体积值
+            try:
+                V_single = float(V_single) if V_single is not None else 0
+                V_t3 = float(V_t3) if V_t3 is not None else 0
+            except (ValueError, TypeError) as e:
+                results['error'] = f"池体体积格式错误: {str(e)}"
+                return results
+
+            V_total_reaction = V_single + V_t3 + V_sed
+            results['composition'] = "单级絮凝池 + T3反应池 + 沉淀池"
+            results['V_single'] = V_single
+            results['V_t3'] = V_t3
+
+        elif dosing_system_type == "验证设计":
+            # 验证设计：T2 + T3 + 沉淀池
+            V_t2 = pool_volumes.get('t2')
+            V_t3 = pool_volumes.get('t3')
+
+            if V_t2 is None or V_t3 is None:
+                results['error'] = "验证设计需要T2和T3反应池体积参数"
+                return results
+
+            # 验证体积值
+            try:
+                V_t2 = float(V_t2) if V_t2 is not None else 0
+                V_t3 = float(V_t3) if V_t3 is not None else 0
+            except (ValueError, TypeError) as e:
+                results['error'] = f"池体体积格式错误: {str(e)}"
+                return results
+
+            V_total_reaction = V_t2 + V_t3 + V_sed
+            results['composition'] = "T2反应池 + T3反应池 + 沉淀池"
+            results['V_t2'] = V_t2
+            results['V_t3'] = V_t3
+        else:
+            results['error'] = f"未知的加药系统类型: {dosing_system_type}"
+            return results
+
+        results['V_sedimentation'] = V_sed
+        results['V_total_reaction'] = V_total_reaction
+
+        # 计算首次磁粉补充量
+        # 系统含固量：4000 mg/L
+        # 磁粉与悬浮物比例：3:1
+        try:
+            M_magnetic = (4000 * 3 * V_total_reaction) / 1000  # kg
+            results['M_magnetic_first'] = M_magnetic
+            results['calculation_formula'] = f"M = (4000 × 3 × {V_total_reaction:.2f}) / 1000 = {M_magnetic:.2f} kg"
+        except Exception as e:
+            results['error'] = f"计算磁粉补充量时出错: {str(e)}"
+
+        return results
+
+    # ====================== 结束新增 ======================
+
     def check_water_quality_feasibility(self, tp_in, tp_out, ss_in, ss_out):
         """第一步：判断水质处理效果是否能实现"""
         # 工况1：水质提标一般水质
@@ -124,7 +421,7 @@ class MagneticPrecipitationCalculator:
                                      pool_length=None, pool_width=None, tube_utilization=None,
                                      calculation_mode="正向计算", q_pac=50, q_pam=2,
                                      ss_in=80, ss_out=8, sludge_recycle_ratio=1.53,
-                                     magnetic_powder_ratio=5,q_max=None):
+                                     magnetic_powder_ratio=5, q_max=None):
         """沉淀池参数计算"""
         results = {}
         adjustment_log = []
@@ -423,6 +720,23 @@ class MagneticPrecipitationCalculator:
 
         N_scraper = (2 / 3 * v_scraper * P_scraper) / (60000 * efficiency_scraper)
 
+        # 9. 沉淀池体积计算（用于加药系统）
+        # 沉淀池上部体积 V沉上 = L沉 × B沉 × (h4沉 + h3沉 + h2沉)
+        V_sed_upper = L_pool * B_pool * (h4_sedimentation + h3_sedimentation + h2_sedimentation)
+
+        # 沉淀池下部体积 V沉下 = 1/3 × π × h5沉 × (1/4×L沉² + 1/4×D泥² + 1/4×L沉×D泥)
+        # 注意：文档中公式使用 L沉²，但实际情况中沉淀池可能是矩形，所以使用 L_pool 和 B_pool 的平均值作为等效边长
+        L_eq = (L_pool + B_pool) / 2  # 等效边长
+
+        V_sed_lower = (1 / 3) * math.pi * h5_sedimentation * (
+                (1 / 4) * L_eq ** 2 +
+                (1 / 4) * D_sludge ** 2 +
+                (1 / 4) * L_eq * D_sludge
+        )
+
+        # 沉淀池总体积
+        V_sed_total = V_sed_upper + V_sed_lower
+
         # 电机选型（根据文档说明）
         if flow_rate > 5000:
             selected_scraper_power = 0.37
@@ -432,12 +746,30 @@ class MagneticPrecipitationCalculator:
         results['P_scraper'] = P_scraper
         results['N_scraper'] = N_scraper
         results['selected_scraper_power'] = selected_scraper_power
+        results['V_sedimentation_upper'] = V_sed_upper
+        results['V_sedimentation_lower'] = V_sed_lower
+        results['V_sedimentation_total'] = V_sed_total
 
         results['adjustment_log'] = adjustment_log
+        # 添加计算说明
+        results['volume_calculation'] = {
+            'formula_upper': 'V沉上 = L沉 × B沉 × (h4沉 + h3沉 + h2沉)',
+            'formula_lower': 'V沉下 = 1/3 × π × h5沉 × (1/4×L沉² + 1/4×D泥² + 1/4×L沉×D泥)',
+            'parameters': {
+                'L_pool': L_pool,
+                'B_pool': B_pool,
+                'h2_sedimentation': h2_sedimentation,
+                'h3_sedimentation': h3_sedimentation,
+                'h4_sedimentation': h4_sedimentation,
+                'h5_sedimentation': h5_sedimentation,
+                'D_sludge': D_sludge,
+                'L_eq': L_eq  # 等效边长
+            }
+        }
         return results
 
     def calculate_single_stage_flocculation(self, ss_in, flow_rate, construction_type,
-                                            d_inlet=None, inlet_type="泵入进水",q_max=None):
+                                            d_inlet=None, inlet_type="泵入进水", q_max=None):
         """单级絮凝池参数计算"""
         results = {}
         adjustment_log = []
@@ -671,7 +1003,7 @@ class MagneticPrecipitationCalculator:
                 w1 = (2 * v1) / d1
                 N1 = (self.resistance_coefficient * water_density * (w1 ** 3) *
                       self.paddle_blades * e * b * (R1 ** 4) * math.sin(math.radians(self.paddle_angle))) / (
-                                 408 * self.gravity)
+                             408 * self.gravity)
 
                 G1 = math.sqrt((1000 * N1) / (self.dynamic_viscosity * Q_max1 * t1))
                 results['G1_in_range'] = 200 <= G1 <= 500
@@ -684,7 +1016,7 @@ class MagneticPrecipitationCalculator:
                 results['w1'] = w1
                 results['N1'] = N1
                 results['Na1'] = (self.motor_condition_factor * N1) / (
-                            self.reducer_efficiency * self.bearing_efficiency)
+                        self.reducer_efficiency * self.bearing_efficiency)
                 results['selected_motor_power'] = self.select_motor_power(results['Na1'])
 
         # 新增：桨叶间距复核（与T3一致）
@@ -795,8 +1127,8 @@ class MagneticPrecipitationCalculator:
 
         results['adjustment_log'] = adjustment_log
         return results
-    # 其他现有的计算函数（T1, T2, T3）保持不变
-    # ... [这里省略了T1, T2, T3的计算函数以节省空间，实际代码中需要保留]
+
+    # 其他现有的计算函数（T1, T2, T3）
     def calculate_t1_parameters(self, ss_in, flow_rate, construction_type, pool_shape,
                                 l=None, w=None, h2=None, d1=None, v1=None, calculation_mode="正向计算"):
         """T1反应池参数计算"""
@@ -1255,9 +1587,9 @@ class MagneticPrecipitationCalculator:
                 results['w_upper'] = w_upper
                 results['N_upper'] = N_upper
                 results['Na_lower'] = (self.motor_condition_factor * N_lower) / (
-                            self.reducer_efficiency * self.bearing_efficiency)
+                        self.reducer_efficiency * self.bearing_efficiency)
                 results['Na_upper'] = (self.motor_condition_factor * N_upper) / (
-                            self.reducer_efficiency * self.bearing_efficiency)
+                        self.reducer_efficiency * self.bearing_efficiency)
                 results['N_total'] = results['Na_lower'] + results['Na_upper']
                 results['selected_motor_power_total'] = self.select_motor_power(results['N_total'])
 
@@ -1454,7 +1786,7 @@ class MagneticPrecipitationCalculator:
                 w1 = (2 * v1) / d1
                 N1 = (self.resistance_coefficient * water_density * (w1 ** 3) *
                       self.paddle_blades * e * b * (R1 ** 4) * math.sin(math.radians(self.paddle_angle))) / (
-                                 408 * self.gravity)
+                             408 * self.gravity)
 
                 # 重新计算速度梯度
                 G1 = math.sqrt((1000 * N1) / (self.dynamic_viscosity * Q_max1 * results['t1']))
@@ -1469,8 +1801,239 @@ class MagneticPrecipitationCalculator:
                 results['w1'] = w1
                 results['N1'] = N1
                 results['Na1'] = (self.motor_condition_factor * N1) / (
-                            self.reducer_efficiency * self.bearing_efficiency)
+                        self.reducer_efficiency * self.bearing_efficiency)
                 results['selected_motor_power'] = self.select_motor_power(results['Na1'])
+
+
+# ====================== 新增：加药系统结果显示函数 ======================
+def display_dosing_system_results(dosing_results, magnetic_results,
+                                  storage_time_preference, dosing_system_type):
+    """显示加药系统计算结果"""
+
+    st.subheader("加药系统主要计算结果")
+
+    # 1. PAC系统
+    st.header("5.1 PAC药剂投加系统")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**PAC加药量计算**")
+        st.write(f"理论经验投加量: {dosing_results['q_a_theory']} mg/L")
+        st.write(f"除磷计算投加量: {dosing_results['q_a_phosphorus']:.2f} mg/L")
+        st.write(f"最终采用投加量: {dosing_results['q_a']:.2f} mg/L")
+        st.write(f"选择依据: {dosing_results['q_a_selection']}")
+
+        # 显示计算过程
+        with st.expander("查看详细计算过程"):
+            st.write("**理论经验值计算:**")
+            # 这里需要从全局变量获取ss_in，在实际使用时需要传入
+            ss_in = st.session_state.get('ss_in', 0)
+            if ss_in <= 100:
+                st.write(f"SS≤100mg/L，理论投加量: 30 mg/L")
+            elif ss_in <= 500:
+                st.write(f"100<SS≤500mg/L，理论投加量: 60 mg/L")
+            elif ss_in <= 1000:
+                st.write(f"500<SS≤1000mg/L，理论投加量: 110 mg/L")
+            else:
+                st.write(f"SS>1000mg/L，理论投加量: 200 mg/L")
+
+            st.write("**除磷计算:**")
+            # 这里需要从全局变量获取tp_in, tp_out，在实际使用时需要传入
+            tp_in = st.session_state.get('tp_in', 0)
+            tp_out = st.session_state.get('tp_out', 0)
+            st.write(f"AL³⁺需求量: ({tp_in} - {tp_out}) × 0.87 × 2 = {dosing_results['q_al3']:.2f} mg/L")
+            st.write(f"AL₂O₃需求量: {dosing_results['q_al3']:.2f} × 102 ÷ 54 = {dosing_results['q_al2o3']:.2f} mg/L")
+
+            pac_type = st.session_state.get('pac_type', '干粉药剂')
+            if pac_type == "水剂":
+                content = "10%"
+            else:
+                content = "30%"
+
+            st.write(
+                f"AL₂O₃加药量: {dosing_results['q_al2o3']:.2f} ÷ {content} = {dosing_results['q_a_phosphorus']:.2f} mg/L")
+
+    with col2:
+        st.write("**PAC加药泵选型**")
+        st.write(f"理论泵流量: {dosing_results['Q_a_pump_theory']:.2f} L/h")
+        st.write(f"选型泵流量 (80%量程): {dosing_results['Q_a_pump_selected']:.2f} L/h")
+        st.write(f"药剂形式: {st.session_state.get('pac_type', '干粉药剂')}")
+
+        pac_type = st.session_state.get('pac_type', '干粉药剂')
+        if pac_type == "干粉药剂":
+            st.write(f"配置浓度: 10%")
+        else:
+            st.write(f"配置浓度: 原液")
+
+        za = st.session_state.get('za', 1)
+        st.write(f"稀释倍数: {za}")
+
+    # PAC制备设备
+    st.subheader("PAC制备设备设计")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.write("**成本优先 (8小时)**")
+        st.write(f"存药容积: {dosing_results['Va_cost'] / 1000:.2f} m³")
+
+    with col2:
+        st.write("**运行稳定优先 (12小时)**")
+        st.write(f"存药容积: {dosing_results['Va_stable'] / 1000:.2f} m³")
+
+    with col3:
+        st.write("**推荐设备**")
+
+        if storage_time_preference == "成本优先":
+            recommended_va = dosing_results['Va_cost']
+        elif storage_time_preference == "运行稳定优先":
+            recommended_va = dosing_results['Va_stable']
+        else:  # 综合考虑
+            recommended_va = dosing_results['Va_recommended']
+
+        st.write(f"推荐容积: {recommended_va / 1000:.2f} m³")
+        st.write(f"对应设备: {dosing_results['Va_recommended'] / 1000:.0f} m³制备设备")
+
+    # 2. 磁粉系统
+    st.header("5.2 磁粉投加系统")
+
+    if 'error' in magnetic_results:
+        st.error(f"❌ {magnetic_results['error']}")
+    else:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.write("**首次磁粉补充量**")
+            st.write(f"工艺组合: {magnetic_results.get('composition', 'N/A')}")
+            st.write(f"总反应体积: {magnetic_results.get('V_total_reaction', 0):.2f} m³")
+            st.write(f"首次磁粉补充量: {magnetic_results.get('M_magnetic_first', 0):.2f} kg")
+
+            # 显示计算公式
+            with st.expander("查看计算公式"):
+                st.write(magnetic_results.get('calculation_formula', 'N/A'))
+                st.write("**参数说明:**")
+                st.write("- 系统含固量: 4000 mg/L")
+                st.write("- 磁粉与悬浮物比例: 3:1")
+
+        with col2:
+            st.write("**运行时磁粉补充量**")
+            st.write(f"日补充量: {dosing_results['Q_magnetic_daily']:.2f} kg/d")
+            st.write(f"建议投加次数: {dosing_results['recommended_times']}次/天")
+
+            dosing_schedule = dosing_results.get('dosing_schedule', {})
+            for times, dose in dosing_schedule.items():
+                st.write(f"- {times}次/天: {dose:.2f} kg/次")
+
+    # 3. PAM系统
+    st.header("5.3 PAM药剂投加系统")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**PAM加药量计算**")
+        st.write(f"理论投加量: {dosing_results['q_m_theory']} mg/L")
+        pam_concentration = st.session_state.get('pam_concentration', 0.15)
+        st.write(f"配置浓度: {pam_concentration}%")
+
+        # 显示理论投加量依据
+        with st.expander("查看理论投加量依据"):
+            ss_in = st.session_state.get('ss_in', 0)
+            if ss_in <= 100:
+                st.write(f"SS≤100mg/L，理论投加量: 2 mg/L")
+            elif ss_in <= 500:
+                st.write(f"100<SS≤500mg/L，理论投加量: 5 mg/L")
+            elif ss_in <= 1000:
+                st.write(f"500<SS≤1000mg/L，理论投加量: 7 mg/L")
+            else:
+                st.write(f"SS>1000mg/L，理论投加量: 10 mg/L")
+
+    with col2:
+        st.write("**PAM加药泵选型**")
+        st.write(f"理论泵流量: {dosing_results['Q_m_pump_theory']:.2f} L/h")
+        st.write(f"选型泵流量 (80%量程): {dosing_results['Q_m_pump_selected']:.2f} L/h")
+        st.write(f"最小配置能力: {dosing_results['min_pam_capacity']:.2f} L/h")
+        st.write(f"推荐设备容量: {dosing_results['recommended_pam_capacity']} L/h")
+
+    # 结果汇总表格
+    st.header("加药系统结果汇总")
+
+    summary_data = dosing_results.get('summary', {})
+
+    for system, params in summary_data.items():
+        st.subheader(f"{system}")
+
+        summary_df = pd.DataFrame({
+            '参数': list(params.keys()),
+            '数值': list(params.values())
+        })
+
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    # 操作建议
+    st.header("操作建议")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.info("**PAC系统**")
+        st.write("1. 现场调试以20ppm为基准小试")
+        st.write("2. 根据小试结果调整投加量")
+        st.write("3. 定期检查药剂配置浓度")
+
+    with col2:
+        st.info("**磁粉系统**")
+        st.write("1. 首次投加后需循环均匀")
+        st.write("2. 建议分4次/天补充")
+        st.write("3. 监测系统含固量")
+
+    with col3:
+        st.info("**PAM系统**")
+        st.write("1. 注意配置浓度控制")
+        st.write("2. 避免药剂过度稀释")
+        st.write("3. 定期清洗加药管路")
+
+    # 导出结果按钮
+    if st.button("📥 导出加药系统计算结果"):
+        # 创建可下载的数据
+        flow_rate = st.session_state.get('flow_rate', 0)
+        ss_in = st.session_state.get('ss_in', 0)
+        tp_in = st.session_state.get('tp_in', 0)
+        tp_out = st.session_state.get('tp_out', 0)
+
+        export_data = {
+            '计算时间': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+            '工艺类型': dosing_system_type,
+            '处理水量': f"{flow_rate:.2f} m³/d",
+            '进水SS': f"{ss_in} mg/L",
+            '进水TP': f"{tp_in} mg/L",
+            '出水TP': f"{tp_out} mg/L"
+        }
+
+        # 合并所有结果
+        for key, value in dosing_results.items():
+            if key not in ['summary', 'adjustment_log']:
+                if isinstance(value, (int, float)):
+                    export_data[key] = value
+                elif isinstance(value, str):
+                    export_data[key] = value
+                else:
+                    export_data[key] = str(value)
+
+        export_df = pd.DataFrame(list(export_data.items()), columns=['参数', '数值'])
+
+        # 转换为CSV
+        csv = export_df.to_csv(index=False)
+
+        st.download_button(
+            label="下载CSV文件",
+            data=csv,
+            file_name=f"加药系统计算结果_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+
+# ====================== 结束新增 ======================
+
 
 def main():
     st.set_page_config(page_title="磁沉淀工艺计算系统", layout="wide")
@@ -1485,16 +2048,32 @@ def main():
         st.session_state.show_adjustment = False
     if 'calculation_completed' not in st.session_state:
         st.session_state.calculation_completed = False
+    # ====================== 新增：加药系统会话状态 ======================
+    if 'dosing_results' not in st.session_state:
+        st.session_state.dosing_results = None
+    if 'dosing_calculation_completed' not in st.session_state:
+        st.session_state.dosing_calculation_completed = False
+    if 'sedimentation_results' not in st.session_state:
+        st.session_state.sedimentation_results = None
+    if 'single_stage_results' not in st.session_state:
+        st.session_state.single_stage_results = None
+    if 't2_results' not in st.session_state:
+        st.session_state.t2_results = None
+    if 't3_results' not in st.session_state:
+        st.session_state.t3_results = None
+    # ====================== 结束新增 ======================
 
     # 侧边栏输入参数
     st.sidebar.header("📋 输入参数")
 
-    # 反应池类型选择 - 增加单级絮凝池
+    # ====================== 修改：在反应池类型选项中新增"加药系统" ======================
     reactor_type = st.sidebar.selectbox(
         "反应池类型",
-        ["T1反应池", "T2反应池", "T3反应池", "单级絮凝池","沉淀池"],
+        ["T1反应池", "T2反应池", "T3反应池", "单级絮凝池", "沉淀池", "加药系统"],  # 添加"加药系统"
         help="选择要计算的反应池类型"
     )
+    # ====================== 结束修改 ======================
+
     # 沉淀池特有的参数输入
     if reactor_type == "沉淀池":
         st.sidebar.subheader("沉淀池参数")
@@ -1535,7 +2114,57 @@ def main():
         construction_type = "钢结构"  # 沉淀池通常为钢结构
         pool_shape = "矩形"  # 沉淀池为矩形
 
-    # 计算模式选择 - 单级絮凝池只有正向计算
+    # ====================== 新增：加药系统特有的参数输入 ======================
+    elif reactor_type == "加药系统":
+        calculation_mode = "正向计算"  # 加药系统只有正向计算
+        st.sidebar.info("加药系统支持计算PAC、磁粉和PAM的投加参数")
+
+        # 加药系统参数
+        st.sidebar.subheader("加药系统参数")
+        dosing_system_type = st.sidebar.selectbox(
+            "加药系统类型",
+            ["全新设计", "验证设计"],
+            help="全新设计：单级絮凝池+T3+沉淀池\n验证设计：T2+T3+沉淀池"
+        )
+
+        pac_type = st.sidebar.selectbox(
+            "PAC药剂形式",
+            ["干粉药剂", "水剂"],
+            help="选择PAC药剂的供应形式"
+        )
+
+        pam_concentration = st.sidebar.number_input(
+            "PAM配置浓度 (%)",
+            min_value=0.1,
+            max_value=0.5,
+            value=0.15,
+            step=0.05,
+            help="PAM药剂的配置浓度，建议0.1%-0.2%"
+        )
+
+        za = st.sidebar.number_input(
+            "PAC稀释倍数",
+            min_value=1,
+            max_value=10,
+            value=1,
+            help="PAC药剂的稀释倍数，一般为1，小试时根据实际情况调整"
+        )
+
+        storage_time_preference = st.sidebar.selectbox(
+            "储药时间偏好",
+            ["成本优先", "运行稳定优先", "综合考虑"],
+            help="成本优先：8小时存药\n运行稳定优先：12小时存药\n综合考虑：自动选择"
+        )
+
+        # 保存到会话状态，供其他函数使用
+        st.session_state.pac_type = pac_type
+        st.session_state.pam_concentration = pam_concentration
+        st.session_state.za = za
+        st.session_state.dosing_system_type = dosing_system_type
+        st.session_state.storage_time_preference = storage_time_preference
+    # ====================== 结束新增 ======================
+
+    # 单级絮凝池特有的参数输入
     elif reactor_type == "单级絮凝池":
         calculation_mode = "正向计算"
         st.sidebar.info("单级絮凝池只支持正向计算模式")
@@ -1569,6 +2198,12 @@ def main():
         tp_out = st.number_input("出水TP值 (mg/L)", min_value=0.0, value=0.2)
         ss_out = st.number_input("出水SS值 (mg/L)", min_value=0.0, value=8.0)
 
+    # 保存水质参数到会话状态
+    st.session_state.tp_in = tp_in
+    st.session_state.tp_out = tp_out
+    st.session_state.ss_in = ss_in
+    st.session_state.ss_out = ss_out
+
     # 其他参数
     st.sidebar.subheader("其他参数")
     construction_type = st.sidebar.selectbox("建设形式", ["钢结构", "土建"])
@@ -1583,6 +2218,11 @@ def main():
         # 单级絮凝池强制为矩形池体
         pool_shape = "矩形"
         st.sidebar.info("单级絮凝池采用矩形池体设计")
+    elif reactor_type == "加药系统":
+        # 加药系统不需要池体形状和进水类型
+        pool_shape = None
+        inlet_type = None
+        d_inlet = None
     else:
         pool_shape = st.sidebar.selectbox("反应池池体形状", ["圆形", "矩形"])
         inlet_type = "泵入进水"
@@ -1592,7 +2232,7 @@ def main():
     l, w, h2 = None, None, None
 
     # 反向计算专用输入（单级絮凝池不需要）
-    if calculation_mode == "反向计算" and reactor_type != "单级絮凝池":
+    if calculation_mode == "反向计算" and reactor_type != "单级絮凝池" and reactor_type != "加药系统":
         st.sidebar.subheader("池体尺寸参数（反向计算）")
         if pool_shape == "圆形":
             D_input = st.sidebar.number_input("池体直径 D (m)", min_value=0.1, value=2.0)
@@ -1663,11 +2303,231 @@ def main():
         with col4:
             st.metric(f"计算使用的流量 ({flow_display_name})", f"{flow_rate:.2f} m³/d")
 
+        # 保存流量信息到会话状态
+        st.session_state.flow_rate = flow_rate
+        st.session_state.q0 = q0
+        st.session_state.q_max = q_max
+        st.session_state.flow_display_name = flow_display_name
+        st.session_state.flow_selection = flow_selection
+
         # 第四步：计算反应池参数
         st.header(f"第四步：{reactor_type}参数计算")
 
-        # 在计算按钮的处理逻辑中添加沉淀池分支
-        if reactor_type == "沉淀池":
+        # ====================== 新增：加药系统计算分支 ======================
+        if reactor_type == "加药系统":
+            st.header("第五步：加药系统参数计算")
+
+            # 检查是否已计算相关池体
+            required_pools_calculated = True
+            missing_pools = []
+            missing_details = []
+
+            # 检查沉淀池是否已计算 - 更严格的检查
+            if ('sedimentation_results' not in st.session_state or
+                    st.session_state.sedimentation_results is None):
+                required_pools_calculated = False
+                missing_pools.append("沉淀池")
+                missing_details.append("请在反应池类型中选择'沉淀池'并进行计算")
+            else:
+                # 进一步检查沉淀池结果是否有必要的键
+                sed_results = st.session_state.sedimentation_results
+                required_keys = ['L_pool', 'B_pool', 'h_total_sedimentation']
+                missing_keys = [key for key in required_keys if key not in sed_results]
+                if missing_keys:
+                    required_pools_calculated = False
+                    missing_pools.append("沉淀池")
+                    missing_details.append(f"沉淀池结果缺少必要参数: {', '.join(missing_keys)}")
+
+            # 根据选择的加药系统类型检查其他池体
+            if dosing_system_type == "全新设计":
+                if ('single_stage_results' not in st.session_state or
+                        st.session_state.single_stage_results is None):
+                    required_pools_calculated = False
+                    missing_pools.append("单级絮凝池")
+                    missing_details.append("请在反应池类型中选择'单级絮凝池'并进行计算")
+                elif 'V1' not in st.session_state.single_stage_results:
+                    required_pools_calculated = False
+                    missing_pools.append("单级絮凝池")
+                    missing_details.append("单级絮凝池结果缺少体积参数'V1'")
+
+                if ('t3_results' not in st.session_state or
+                        st.session_state.t3_results is None):
+                    required_pools_calculated = False
+                    missing_pools.append("T3反应池")
+                    missing_details.append("请在反应池类型中选择'T3反应池'并进行计算")
+                elif 'V1' not in st.session_state.t3_results:
+                    required_pools_calculated = False
+                    missing_pools.append("T3反应池")
+                    missing_details.append("T3反应池结果缺少体积参数'V1'")
+
+            else:  # 验证设计
+                if ('t2_results' not in st.session_state or
+                        st.session_state.t2_results is None):
+                    required_pools_calculated = False
+                    missing_pools.append("T2反应池")
+                    missing_details.append("请在反应池类型中选择'T2反应池'并进行计算")
+                elif 'V1' not in st.session_state.t2_results:
+                    required_pools_calculated = False
+                    missing_pools.append("T2反应池")
+                    missing_details.append("T2反应池结果缺少体积参数'V1'")
+
+                if ('t3_results' not in st.session_state or
+                        st.session_state.t3_results is None):
+                    required_pools_calculated = False
+                    missing_pools.append("T3反应池")
+                    missing_details.append("请在反应池类型中选择'T3反应池'并进行计算")
+                elif 'V1' not in st.session_state.t3_results:
+                    required_pools_calculated = False
+                    missing_pools.append("T3反应池")
+                    missing_details.append("T3反应池结果缺少体积参数'V1'")
+
+            if not required_pools_calculated:
+                st.error(f"❌ 计算加药系统需要先计算以下池体：")
+                for i, pool in enumerate(missing_pools):
+                    st.write(f"- **{pool}**: {missing_details[i]}")
+                st.info("请按以下步骤操作：")
+                st.info("1. 在左侧边栏'反应池类型'中选择需要计算的池体")
+                st.info("2. 点击'开始计算'按钮进行计算")
+                st.info("3. 重复以上步骤，直到计算完所有需要的池体")
+                st.info("4. 最后再选择'加药系统'进行计算")
+                return
+
+            # 从会话状态获取相关池体体积 - 增加安全检查
+            pool_volumes = {}
+
+            # 沉淀池体积 - 使用新的体积计算方法
+            try:
+                sed_results = st.session_state.sedimentation_results
+                if sed_results and isinstance(sed_results, dict):
+                    # 使用新的体积计算方法
+                    if 'V_sedimentation_total' in sed_results:
+                        pool_volumes['sedimentation'] = sed_results['V_sedimentation_total']
+                        st.success(f"✅ 沉淀池体积计算: {sed_results['V_sedimentation_total']:.2f} m³")
+
+                        # 显示详细计算过程
+                        with st.expander("查看沉淀池体积计算详情"):
+                            st.write(f"上部体积 (V沉上): {sed_results.get('V_sedimentation_upper', 0):.2f} m³")
+                            st.write(f"下部体积 (V沉下): {sed_results.get('V_sedimentation_lower', 0):.2f} m³")
+                            st.write(f"沉淀池总体积 (V沉): {sed_results['V_sedimentation_total']:.2f} m³")
+
+                            # 显示计算公式
+                            vol_calc = sed_results.get('volume_calculation', {})
+                            st.write("**计算公式:**")
+                            st.write(f"上部: {vol_calc.get('formula_upper', 'N/A')}")
+                            st.write(f"下部: {vol_calc.get('formula_lower', 'N/A')}")
+                    else:
+                        # 后备方案：使用旧方法估算
+                        L_pool = sed_results.get('L_pool')
+                        B_pool = sed_results.get('B_pool')
+                        h_total = sed_results.get('h_total_sedimentation')
+
+                        if L_pool and B_pool and h_total:
+                            pool_volumes['sedimentation'] = L_pool * B_pool * h_total
+                            st.warning(
+                                f"⚠️ 使用后备方法计算沉淀池体积: {L_pool:.2f} × {B_pool:.2f} × {h_total:.2f} = {pool_volumes['sedimentation']:.2f} m³")
+                        else:
+                            st.error("❌ 沉淀池结果中缺少必要的尺寸参数")
+                            return
+                else:
+                    st.error("❌ 沉淀池结果格式错误")
+                    return
+            except Exception as e:
+                st.error(f"❌ 获取沉淀池体积时出错: {str(e)}")
+                return
+
+            # 获取其他池体体积 - 增加安全检查
+            pool_volume_keys = {
+                'single': ('single_stage_results', '单级絮凝池'),
+                't1': ('t1_results', 'T1反应池'),
+                't2': ('t2_results', 'T2反应池'),
+                't3': ('t3_results', 'T3反应池')
+            }
+
+            for key, (state_key, pool_name) in pool_volume_keys.items():
+                try:
+                    if state_key in st.session_state and st.session_state[state_key] is not None:
+                        pool_results = st.session_state[state_key]
+                        if isinstance(pool_results, dict) and 'V1' in pool_results:
+                            volume = pool_results['V1']
+                            pool_volumes[key] = volume
+                            st.success(f"✅ {pool_name}体积: {volume:.2f} m³")
+                        else:
+                            pool_volumes[key] = 0
+                            st.warning(f"⚠️ {pool_name}结果中缺少体积参数'V1'，体积设为0")
+                    else:
+                        pool_volumes[key] = 0
+                        # 只对需要的池体显示警告
+                        if (dosing_system_type == "全新设计" and key in ['single', 't3']) or \
+                                (dosing_system_type == "验证设计" and key in ['t2', 't3']):
+                            st.warning(f"⚠️ {pool_name}未计算，体积设为0")
+                        else:
+                            pool_volumes[key] = None  # 不需要的池体设为None
+                except Exception as e:
+                    st.error(f"❌ 获取{pool_name}体积时出错: {str(e)}")
+                    pool_volumes[key] = 0
+
+            # 调试信息：显示获取到的池体体积
+            with st.expander("查看池体体积详情"):
+                st.write("获取到的池体体积:")
+                for key, volume in pool_volumes.items():
+                    if volume is not None:
+                        st.write(f"- {key}: {volume:.2f} m³")
+                    else:
+                        st.write(f"- {key}: 未计算")
+
+            # 检查必要的池体体积是否都获取到了
+            if dosing_system_type == "全新设计":
+                if pool_volumes.get('single') is None or pool_volumes.get('t3') is None:
+                    st.error("❌ 全新设计需要单级絮凝池和T3反应池体积")
+                    return
+            else:  # 验证设计
+                if pool_volumes.get('t2') is None or pool_volumes.get('t3') is None:
+                    st.error("❌ 验证设计需要T2和T3反应池体积")
+                    return
+
+            # 计算加药系统参数
+            try:
+                dosing_results = calculator.calculate_dosing_system(
+                    flow_rate, ss_in, tp_in, tp_out, construction_type,
+                    pac_type, pam_concentration, dosing_system_type, za
+                )
+            except Exception as e:
+                st.error(f"❌ 计算加药系统参数时出错: {str(e)}")
+                st.info("请检查输入参数是否正确")
+                return
+
+            # 计算首次磁粉补充量
+            try:
+                magnetic_results = calculator.calculate_magnetic_powder_first_dose(
+                    pool_volumes, dosing_system_type
+                )
+            except Exception as e:
+                st.error(f"❌ 计算首次磁粉补充量时出错: {str(e)}")
+                st.info("请检查池体体积参数是否正确")
+                return
+
+            # 合并结果
+            dosing_results['magnetic_first_dose'] = magnetic_results
+
+            # 保存结果到会话状态
+            st.session_state.dosing_results = dosing_results
+            st.session_state.dosing_calculation_completed = True
+            st.session_state.reactor_type = reactor_type
+
+            # 显示计算结果
+            try:
+                display_dosing_system_results(dosing_results, magnetic_results,
+                                              storage_time_preference, dosing_system_type)
+            except Exception as e:
+                st.error(f"❌ 显示加药系统结果时出错: {str(e)}")
+                st.info("请检查计算结果格式")
+                return
+
+            # 直接返回，避免执行后续的反应池检查逻辑
+            return
+        # ====================== 结束新增 ======================
+
+        elif reactor_type == "沉淀池":
             st.info(f"🔍 {calculation_mode}计算模式：沉淀池参数计算")
 
             # 获取T1池的设备总高度（如果有的话）
@@ -1679,16 +2539,20 @@ def main():
             sedimentation_results = calculator.calculate_sedimentation_pool(
                 flow_rate, construction_type, total_height_input,
                 pool_length, pool_width, tube_utilization, calculation_mode,
-                q_pac, q_pam, ss_in, ss_out, sludge_recycle_ratio, magnetic_powder_ratio,q_max
+                q_pac, q_pam, ss_in, ss_out, sludge_recycle_ratio, magnetic_powder_ratio, q_max
             )
 
-            # 将沉淀池结果也赋值给t1_results，以便后续统一处理
+            # 将沉淀池结果保存到t1_results（用于兼容原有显示逻辑）
             t1_results = sedimentation_results
 
             # 保存计算结果到会话状态
             st.session_state.t1_results = sedimentation_results
             st.session_state.calculation_completed = True
             st.session_state.reactor_type = reactor_type
+
+            # 关键：单独保存沉淀池结果，便于加药系统引用
+            st.session_state.sedimentation_results = sedimentation_results
+
             st.session_state.flow_selection = flow_selection
             st.session_state.calculation_mode = calculation_mode
             st.session_state.pool_shape = pool_shape
@@ -1718,31 +2582,32 @@ def main():
         elif reactor_type == "单级絮凝池":
             st.info("🔍 单级絮凝池正向计算模式")
             t1_results = calculator.calculate_single_stage_flocculation(
-                ss_in, flow_rate, construction_type, d_inlet, inlet_type,q_max
+                ss_in, flow_rate, construction_type, d_inlet, inlet_type, q_max
             )
+            # 保存单级絮凝池结果到会话状态
+            st.session_state.single_stage_results = t1_results
         elif calculation_mode == "正向计算":
             st.info(f"🔍 正向计算模式：根据水质参数计算{reactor_type}池体尺寸")
-            # 这里调用原有的T1, T2, T3计算函数
-            # 为简洁起见，省略具体实现
             if reactor_type == "T1反应池":
                 t1_results = calculator.calculate_t1_parameters(
                     ss_in, flow_rate, construction_type, pool_shape,
                     calculation_mode=calculation_mode
                 )
+                st.session_state.t1_results = t1_results
             elif reactor_type == "T2反应池":
                 t1_results = calculator.calculate_t2_parameters(
                     ss_in, flow_rate, construction_type, pool_shape,
                     calculation_mode=calculation_mode
                 )
+                st.session_state.t2_results = t1_results
             else:  # T3反应池
                 t1_results = calculator.calculate_t3_parameters(
                     ss_in, flow_rate, construction_type, pool_shape,
                     calculation_mode=calculation_mode
                 )
+                st.session_state.t3_results = t1_results
         else:
             st.info(f"🔍 反向计算模式：根据池体尺寸验证{reactor_type}水力停留时间")
-            # 这里调用原有的T1, T2, T3反向计算函数
-            # 为简洁起见，省略具体实现
             if l is None or h2 is None:
                 st.error("❌ 反向计算需要输入池体尺寸参数")
                 st.stop()
@@ -1752,86 +2617,92 @@ def main():
                     ss_in, flow_rate, construction_type, pool_shape,
                     l, w, h2, calculation_mode=calculation_mode
                 )
+                st.session_state.t1_results = t1_results
             elif reactor_type == "T2反应池":
                 t1_results = calculator.calculate_t2_parameters(
                     ss_in, flow_rate, construction_type, pool_shape,
                     l, w, h2, calculation_mode=calculation_mode
                 )
+                st.session_state.t2_results = t1_results
             else:  # T3反应池
                 t1_results = calculator.calculate_t3_parameters(
                     ss_in, flow_rate, construction_type, pool_shape,
                     l, w, h2, calculation_mode=calculation_mode
                 )
+                st.session_state.t3_results = t1_results
 
-        # 保存计算结果到会话状态
-        st.session_state.t1_results = t1_results
-        st.session_state.calculation_completed = True
-        st.session_state.flow_selection = flow_selection
-        st.session_state.calculation_mode = calculation_mode
-        st.session_state.pool_shape = pool_shape
-        st.session_state.q0 = q0
-        st.session_state.q_max = q_max
-        st.session_state.flow_rate = flow_rate
-        st.session_state.flow_display_name = flow_display_name
-        st.session_state.l = l
-        st.session_state.w = w
-        st.session_state.reactor_type = reactor_type
+        # 保存计算结果到会话状态（对于非加药系统的反应池）
+        if reactor_type != "加药系统":
+            st.session_state.t1_results = t1_results
+            st.session_state.calculation_completed = True
+            st.session_state.reactor_type = reactor_type
+            st.session_state.flow_selection = flow_selection
+            st.session_state.calculation_mode = calculation_mode
+            st.session_state.pool_shape = pool_shape
+            st.session_state.q0 = q0
+            st.session_state.q_max = q_max
+            st.session_state.flow_rate = flow_rate
+            st.session_state.flow_display_name = flow_display_name
+            st.session_state.l = l
+            st.session_state.w = w
 
         # 显示自动调整日志
-        if t1_results.get('adjustment_log'):
+        if reactor_type != "加药系统" and t1_results.get('adjustment_log'):
             st.header("🔄 自动调整记录")
             for log in t1_results['adjustment_log']:
                 st.info(log)
 
-        # 检查关键参数是否在范围内
-        if reactor_type == "单级絮凝池":
-            # 检查速度梯度
-            g1_min, g1_max = t1_results['G1_range']
-            if not t1_results['G1_in_range']:
-                st.session_state.show_adjustment = True
-                st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: {g1_min}-{g1_max} s⁻¹)")
-                st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
-            else:
-                st.session_state.show_adjustment = False
-                st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
-
-            # 检查导流筒覆盖面积比值
-            if not t1_results['Y_guide_in_range']:
-                st.warning(f"⚠️ 导流筒覆盖面积比值不在建议范围内: {t1_results['Y_guide']:.3f} (建议: 0.15-0.20)")
-
-            # 检查流速校核
-            if not t1_results['velocity_check_ok']:
-                st.warning(f"⚠️ 各部位流速差异较大: {t1_results['velocity_diff']:.3f} m/s，建议优化设计")
-        elif reactor_type == "T3反应池":
-            # T3需要检查上下层速度梯度
-            g_lower_min, g_lower_max = t1_results['G_lower_range']
-            g_upper_min, g_upper_max = t1_results['G_upper_range']
-
-            g_lower_ok = t1_results['G_lower_in_range']
-            g_upper_ok = t1_results['G_upper_in_range']
-
-            if not g_lower_ok or not g_upper_ok:
-                st.session_state.show_adjustment = True
-                if not g_lower_ok:
+        # 检查关键参数是否在范围内（非加药系统）
+        if reactor_type != "加药系统":
+            if reactor_type == "单级絮凝池":
+                # 检查速度梯度
+                g1_min, g1_max = t1_results['G1_range']
+                if not t1_results['G1_in_range']:
+                    st.session_state.show_adjustment = True
                     st.error(
-                        f"❌ 下层速度梯度 G_lower 不在正常范围内: {t1_results['G_lower']:.2f} s⁻¹ (正常范围: {g_lower_min}-{g_lower_max} s⁻¹)")
-                if not g_upper_ok:
+                        f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: {g1_min}-{g1_max} s⁻¹)")
+                    st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
+                else:
+                    st.session_state.show_adjustment = False
+                    st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
+
+                # 检查导流筒覆盖面积比值
+                if not t1_results['Y_guide_in_range']:
+                    st.warning(f"⚠️ 导流筒覆盖面积比值不在建议范围内: {t1_results['Y_guide']:.3f} (建议: 0.15-0.20)")
+
+                # 检查流速校核
+                if not t1_results['velocity_check_ok']:
+                    st.warning(f"⚠️ 各部位流速差异较大: {t1_results['velocity_diff']:.3f} m/s，建议优化设计")
+            elif reactor_type == "T3反应池":
+                # T3需要检查上下层速度梯度
+                g_lower_min, g_lower_max = t1_results['G_lower_range']
+                g_upper_min, g_upper_max = t1_results['G_upper_range']
+
+                g_lower_ok = t1_results['G_lower_in_range']
+                g_upper_ok = t1_results['G_upper_in_range']
+
+                if not g_lower_ok or not g_upper_ok:
+                    st.session_state.show_adjustment = True
+                    if not g_lower_ok:
+                        st.error(
+                            f"❌ 下层速度梯度 G_lower 不在正常范围内: {t1_results['G_lower']:.2f} s⁻¹ (正常范围: {g_lower_min}-{g_lower_max} s⁻¹)")
+                    if not g_upper_ok:
+                        st.error(
+                            f"❌ 上层速度梯度 G_upper 不在正常范围内: {t1_results['G_upper']:.2f} s⁻¹ (正常范围: {g_upper_min}-{g_upper_max} s⁻¹)")
+                    st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
+                else:
+                    st.session_state.show_adjustment = False
+                    st.success(f"✅ 上下层速度梯度均在正常范围内")
+            elif reactor_type != "沉淀池":  # T1T2反应池的速度梯度检查，排除沉淀池
+                g1_min, g1_max = t1_results['G1_range']
+                if not t1_results['G1_in_range']:
+                    st.session_state.show_adjustment = True
                     st.error(
-                        f"❌ 上层速度梯度 G_upper 不在正常范围内: {t1_results['G_upper']:.2f} s⁻¹ (正常范围: {g_upper_min}-{g_upper_max} s⁻¹)")
-                st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
-            else:
-                st.session_state.show_adjustment = False
-                st.success(f"✅ 上下层速度梯度均在正常范围内")
-        else:
-            # T1T2反应池的速度梯度检查
-            g1_min, g1_max = t1_results['G1_range']
-            if not t1_results['G1_in_range']:
-                st.session_state.show_adjustment = True
-                st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: {g1_min}-{g1_max} s⁻¹)")
-                st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
-            else:
-                st.session_state.show_adjustment = False
-                st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
+                        f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹ (正常范围: {g1_min}-{g1_max} s⁻¹)")
+                    st.info("💡 系统已尝试自动调整，如需进一步优化可手动调整参数")
+                else:
+                    st.session_state.show_adjustment = False
+                    st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
         # 显示计算结果
         display_results()
 
@@ -1977,6 +2848,29 @@ def main():
             # 显示调整后的结果
             display_results()
 
+    # ====================== 新增：加药系统的结果显示处理 ======================
+    # 注意：这一行与上面的条件块是同一级别，没有缩进
+    if st.session_state.get('dosing_calculation_completed', False):
+        # 显示加药系统结果
+        if reactor_type == "加药系统":
+            dosing_results = st.session_state.dosing_results
+            magnetic_results = dosing_results.get('magnetic_first_dose', {})
+
+            # 获取存储的参数
+            storage_time_preference = st.session_state.get('storage_time_preference', '综合考虑')
+            dosing_system_type = st.session_state.get('dosing_system_type', '全新设计')
+
+            # 重新显示结果（如果用户需要）
+            if st.button("重新显示加药系统结果"):
+                display_dosing_system_results(
+                    dosing_results, magnetic_results,
+                    storage_time_preference, dosing_system_type
+                )
+    # ====================== 结束新增 ======================
+
+    # 显示计算结果
+    display_results()
+
 
 def display_sedimentation_results(results, flow_rate, calculation_mode):
     """显示沉淀池计算结果"""
@@ -2051,6 +2945,31 @@ def display_sedimentation_results(results, flow_rate, calculation_mode):
         else:
             st.warning("⚠️ 过水流速不在建议范围内")
 
+    # 沉淀池体积计算结果显示
+    st.subheader("沉淀池体积计算")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.write("**上部体积**")
+        st.write(f"公式: L × B × (h4 + h3 + h2)")
+        st.write(f"计算: {results['L_pool']:.2f} × {results['B_pool']:.2f} × "
+                 f"({results['h4_sedimentation']:.2f} + {results.get('h3_sedimentation', 0):.2f} + {results['h2_sedimentation']:.2f})")
+        st.write(f"结果: {results.get('V_sedimentation_upper', 0):.2f} m³")
+
+    with col2:
+        st.write("**下部体积**")
+        st.write(f"公式: 1/3 × π × h5 × (L²/4 + D泥²/4 + L×D泥/4)")
+        L_eq = results.get('volume_calculation', {}).get('parameters', {}).get('L_eq', 0)
+        st.write(f"等效边长 L_eq: {L_eq:.2f} m")
+        st.write(f"下部体积: {results.get('V_sedimentation_lower', 0):.2f} m³")
+
+    with col3:
+        st.write("**总体积**")
+        st.write(f"V沉 = V沉上 + V沉下")
+        st.write(f"计算: {results.get('V_sedimentation_upper', 0):.2f} + {results.get('V_sedimentation_lower', 0):.2f}")
+        st.write(f"沉淀池总体积: {results.get('V_sedimentation_total', 0):.2f} m³")
+        st.info("💡 此体积用于加药系统计算首次磁粉补充量")
+
     # 出水系统设计
     st.subheader("出水系统设计")
     col1, col2 = st.columns(2)
@@ -2100,7 +3019,7 @@ def display_sedimentation_results(results, flow_rate, calculation_mode):
     st.subheader("结果汇总")
     summary_data = {
         '参数': [
-            '沉淀池类型', '计算模式', '池体尺寸(m)', '沉淀池面积(m²)',
+            '沉淀池类型', '计算模式', '池体尺寸(m)', '沉淀池面积(m²)','沉淀池上部体积(m³)', '沉淀池下部体积(m³)', '沉淀池总体积(m³)',
             '斜管利用率(%)', '表面负荷(m³/(m²·h))', '布水区宽度(m)', '布水流速(m/s)',
             '池体总高(m)', '清水区高度(m)', '缓冲区高度(m)', '底坡高度(m)',
             '泥斗高度(m)', '过水板高度(m)', '过水流速(m/s)',
@@ -2109,7 +3028,8 @@ def display_sedimentation_results(results, flow_rate, calculation_mode):
         ],
         '数值': [
             '沉淀池', calculation_mode, f"{results['L_pool']:.2f}×{results['B_pool']:.2f}",
-            f"{results['A_sedimentation']:.2f}", f"{results['n_tube_actual'] * 100:.1f}",
+            f"{results['A_sedimentation']:.2f}",f"{results.get('V_sedimentation_upper', 0):.2f}",
+            f"{results.get('V_sedimentation_lower', 0):.2f}",f"{results.get('V_sedimentation_total', 0):.2f}", f"{results['n_tube_actual'] * 100:.1f}",
             f"{20 if calculation_mode == '正向计算' else results.get('q_sedimentation', 20):.2f}",
             f"{results['b_water_distribution']:.3f}", f"{results['v_water_distribution']:.3f}",
             f"{results['h_total_sedimentation']:.3f}", f"{results['h2_sedimentation']:.3f}",
@@ -2131,8 +3051,208 @@ def display_sedimentation_results(results, flow_rate, calculation_mode):
         for log in results['adjustment_log']:
             st.info(log)
 
+
+# ====================== 新增：display_single_stage_results函数 ======================
+def display_single_stage_results(t1_results, flow_rate, flow_display_name, q0, q_max, flow_selection):
+    """显示单级絮凝池计算结果"""
+    st.subheader("单级絮凝池主要计算结果")
+
+    # 基本信息
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.write("**基本参数**")
+        st.metric("水力停留时间 t1", f"{t1_results['t1']:.2f} s")
+        st.metric("反应池体积 V1", f"{t1_results['V1']:.3f} m³")
+        st.metric("池体当量直径 D", f"{t1_results['D']:.3f} m")
+        st.metric("池体长度 l", f"{t1_results['l']:.3f} m")
+        st.metric("池体宽度 w", f"{t1_results['w']:.3f} m")
+
+    with col2:
+        st.write("**尺寸参数**")
+        st.metric("有效高度 h2", f"{t1_results['h2']:.3f} m")
+        st.metric("池体超高 h1", f"{t1_results['h1']:.3f} m")
+        st.metric("池体总高 h总", f"{t1_results['h_total']:.3f} m")
+        st.metric("搅拌直径 d1", f"{t1_results['d1']:.3f} m")
+        st.metric("设计流量 Qmax1", f"{t1_results['Q_max1']:.6f} m³/s")
+
+    with col3:
+        st.write("**搅拌参数**")
+        st.metric("桨叶线速度 v1", f"{t1_results['v1']:.2f} m/s")
+        st.metric("搅拌转速 n1", f"{t1_results['n1']:.2f} r/min")
+        st.metric("搅拌功率 N1", f"{t1_results['N1']:.4f} kW")
+        st.metric("电动机功率 Na1", f"{t1_results['Na1']:.4f} kW")
+        st.metric("电动机选型功率", f"{t1_results['selected_motor_power']} kW")
+
+    # 折流混合区设计结果
+    st.subheader("折流混合区设计结果")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**进水口参数**")
+        st.write(f"进水类型: {t1_results['inlet_type']}")
+        st.write(f"进水口口径: {t1_results['d_inlet']} mm")
+        st.write(f"进水口面积: {t1_results['S_inlet']:.6f} m²")
+        st.write(f"进水流速: {t1_results['v_inlet']:.3f} m/s")
+
+        st.write("**折流区基本参数**")
+        st.write(f"折流区长度: {t1_results['l_baffle']:.3f} m")
+        st.write(f"折流区宽度: {t1_results['b_baffle']:.3f} m")
+        st.write(f"折流区有效高度: {t1_results['h2_baffle']:.3f} m")
+        st.write(f"折流区停留时间: {t1_results['t_baffle']} s")
+
+    with col2:
+        st.write("**折流板参数**")
+        st.write(f"折流板数量: {t1_results['n_baffle']} 层")
+        st.write(f"折流板间距: {t1_results['b1_baffle']:.3f} m")
+        st.write(f"底层距底高度: {t1_results['h_baffle_bottom']:.3f} m")
+        st.write(f"顶部距水面高度: {t1_results['h_baffle_top']:.3f} m")
+
+        st.write("**扰流板参数**")
+        st.write(f"扰流板高度: {t1_results['h_disturb']:.3f} m")
+        st.write(f"下部扰流板数量: {t1_results['n_disturb']} 个")
+        st.write(f"顶部扰流板数量: {t1_results['n_disturb_top']} 个")
+        st.write(f"扰流板总数: {t1_results['n_disturb_total']} 个")
+
+    # 导流筒设计结果
+    st.subheader("导流筒设计结果")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**导流筒基本参数**")
+        st.write(f"导流筒直径: {t1_results['D_d']:.3f} m")
+        st.write(f"导流筒面积: {t1_results['S_d']:.4f} m²")
+        st.write(f"池体面积: {t1_results['S_pool']:.4f} m²")
+        st.write(f"覆盖面积比值: {t1_results['Y_guide']:.3f}")
+        if t1_results['Y_guide_in_range']:
+            st.success("✅ 导流筒覆盖面积比值在正常范围内 (0.15-0.20)")
+        else:
+            st.warning("⚠️ 导流筒覆盖面积比值不在建议范围内")
+
+        st.write(f"絮凝回流比: {t1_results['r_guide']:.2f}")
+        st.write(f"导流筒总高度: {t1_results['h_guide_total']:.3f} m")
+        st.write(f"喇叭口高度: {t1_results['h_horn']:.3f} m")
+
+    with col2:
+        st.write("**底部导流板参数**")
+        st.write(f"导流板高度: {t1_results['h_guide_plate']:.3f} m")
+        st.write(f"导流板宽度: {t1_results['b_guide_plate']:.3f} m")
+        st.write(f"导流板数量: {t1_results['n_guide_plate']} 块")
+
+        st.write("**流速校核**")
+        st.write(f"导流筒内流速: {t1_results['v1_guide']:.3f} m/s")
+        st.write(f"导流筒上缘流速: {t1_results['v2_upper']:.3f} m/s")
+        st.write(f"喇叭口以上流速: {t1_results['v3_above_horn']:.3f} m/s")
+        st.write(f"喇叭口处流速: {t1_results['v4_horn']:.3f} m/s")
+        st.write(f"喇叭口以下流速: {t1_results['v5_below']:.3f} m/s")
+        st.write(f"最大流速差: {t1_results['velocity_diff']:.3f} m/s")
+        if t1_results['velocity_check_ok']:
+            st.success("✅ 各部位流速差异较小，环流效果良好")
+        else:
+            st.warning("⚠️ 各部位流速差异较大，建议优化设计")
+
+    # 复核参数
+    st.subheader("复核参数")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**搅拌系统复核**")
+        st.write(f"S1/S 比值: {t1_results['S1_S_ratio']:.4f}")
+        if t1_results['S1_S_in_range']:
+            st.success("✅ S1/S 比值满足要求 (< 0.25)")
+        else:
+            st.error(f"❌ S1/S 比值不小于 0.25: {t1_results['S1_S_ratio']:.4f}")
+
+        st.write(f"搅拌层数: {t1_results['e']}")
+        st.write(f"桨叶宽度: {t1_results['b']:.3f} m")
+        st.write(f"速度梯度 G1: {t1_results['G1']:.2f} s⁻¹")
+
+        g1_min, g1_max = t1_results['G1_range']
+        if t1_results['G1_in_range']:
+            st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
+        else:
+            st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹")
+
+    with col2:
+        st.write("**几何尺寸复核**")
+        st.write(f"h2/D 比值: {t1_results['h2'] / t1_results['D']:.3f}")
+        st.write(f"桨叶间距: {t1_results['l1_single']:.3f} m")
+
+        # 新增：桨叶间距复核显示
+        st.write("**桨叶间距复核**")
+        st.write(f"下层距池底距离: {t1_results['l1']:.3f} m")
+        st.write(f"桨叶间距: {t1_results['l2']:.3f} m")
+        st.write(f"上层距水面距离: {t1_results['distance_to_surface']:.3f} m")
+
+        dist_min, dist_max = t1_results['distance_surface_range']
+        if t1_results['distance_surface_in_range']:
+            st.success(f"✅ 上层距水面距离在正常范围内 ({dist_min:.3f}-{dist_max:.3f} m)")
+        else:
+            st.warning(
+                f"⚠️ 上层距水面距离不在建议范围内: {t1_results['distance_to_surface']:.3f} m (建议: {dist_min:.3f}-{dist_max:.3f} m)")
+
+    # 结果汇总表格
+    st.subheader("结果汇总")
+    summary_data = {
+        '参数': [
+            '反应池类型', '计算模式', '流量选择', '进水类型',
+            '单套设备处理量 Q0 (m³/d)', '单套设备最大处理量 Qmax (m³/d)', '计算使用流量 (m³/d)',
+            '水力停留时间 t1 (s)', '反应池体积 V1 (m³)', '池体当量直径 D (m)',
+            '池体长度 l (m)', '池体宽度 w (m)', '有效高度 h2 (m)', '池体超高 h1 (m)',
+            '池体总高 h总 (m)', '搅拌桨叶线速度 v1 (m/s)', '搅拌转速 n1 (r/min)',
+            '搅拌直径 d1 (m)', '搅拌功率 N1 (kW)', '电动机功率 Na1 (kW)',
+            '电动机选型功率 (kW)', '速度梯度 G1 (s⁻¹)', '导流筒覆盖面积比值',
+            '絮凝回流比', '最大流速差 (m/s)'
+        ],
+        '数值': [
+            '单级絮凝池', '正向计算', flow_selection, t1_results['inlet_type'],
+            f"{q0:.2f}", f"{q_max:.2f}", f"{flow_rate:.2f}",
+            f"{t1_results['t1']:.2f}", f"{t1_results['V1']:.3f}", f"{t1_results['D']:.3f}",
+            f"{t1_results['l']:.3f}", f"{t1_results['w']:.3f}", f"{t1_results['h2']:.3f}",
+            f"{t1_results['h1']:.3f}", f"{t1_results['h_total']:.3f}", f"{t1_results['v1']:.2f}",
+            f"{t1_results['n1']:.2f}", f"{t1_results['d1']:.3f}", f"{t1_results['N1']:.4f}",
+            f"{t1_results['Na1']:.4f}", f"{t1_results['selected_motor_power']}",
+            f"{t1_results['G1']:.2f}", f"{t1_results['Y_guide']:.3f}",
+            f"{t1_results['r_guide']:.2f}", f"{t1_results['velocity_diff']:.3f}"
+        ]
+    }
+
+    df = pd.DataFrame(summary_data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ====================== 结束新增 ======================
+
 def display_results():
     """显示计算结果的通用函数"""
+
+    # 从会话状态获取变量
+    if 'reactor_type' in st.session_state:
+        reactor_type = st.session_state.reactor_type
+    else:
+        st.info("请先进行计算")
+        return
+
+    # ====================== 新增：加药系统的结果显示 ======================
+    if reactor_type == "加药系统":
+        if 'dosing_results' in st.session_state:
+            dosing_results = st.session_state.dosing_results
+            magnetic_results = dosing_results.get('magnetic_first_dose', {})
+
+            # 获取存储的参数
+            storage_time_preference = st.session_state.get('storage_time_preference', '综合考虑')
+            dosing_system_type = st.session_state.get('dosing_system_type', '全新设计')
+
+            display_dosing_system_results(
+                dosing_results, magnetic_results,
+                storage_time_preference, dosing_system_type
+            )
+        else:
+            st.info("请先点击'开始计算'按钮进行计算加药系统")
+        return  # 重要：加药系统显示完后直接返回，不执行下面的其他池体显示
+    # ====================== 结束新增 ======================
+
+    # 从会话状态获取其他变量
     t1_results = st.session_state.t1_results
     calculation_mode = st.session_state.calculation_mode
     pool_shape = st.session_state.pool_shape
@@ -2143,7 +3263,6 @@ def display_results():
     flow_selection = st.session_state.flow_selection
     l = st.session_state.l
     w = st.session_state.w
-    reactor_type = st.session_state.reactor_type
 
     if reactor_type == "沉淀池":
         display_sedimentation_results(
@@ -2156,7 +3275,6 @@ def display_results():
         display_single_stage_results(t1_results, flow_rate, flow_display_name, q0, q_max, flow_selection)
     else:
         # 原有的T1, T2, T3结果显示逻辑
-        # 为简洁起见，这里省略具体实现
         st.subheader(f"{reactor_type}主要计算结果")
 
         if reactor_type == "T3反应池":
@@ -2380,174 +3498,6 @@ def display_results():
 
         df = pd.DataFrame(summary_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
-
-
-def display_single_stage_results(t1_results, flow_rate, flow_display_name, q0, q_max, flow_selection):
-    """显示单级絮凝池计算结果"""
-    st.subheader("单级絮凝池主要计算结果")
-
-    # 基本信息
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.write("**基本参数**")
-        st.metric("水力停留时间 t1", f"{t1_results['t1']:.2f} s")
-        st.metric("反应池体积 V1", f"{t1_results['V1']:.3f} m³")
-        st.metric("池体当量直径 D", f"{t1_results['D']:.3f} m")
-        st.metric("池体长度 l", f"{t1_results['l']:.3f} m")
-        st.metric("池体宽度 w", f"{t1_results['w']:.3f} m")
-
-    with col2:
-        st.write("**尺寸参数**")
-        st.metric("有效高度 h2", f"{t1_results['h2']:.3f} m")
-        st.metric("池体超高 h1", f"{t1_results['h1']:.3f} m")
-        st.metric("池体总高 h总", f"{t1_results['h_total']:.3f} m")
-        st.metric("搅拌直径 d1", f"{t1_results['d1']:.3f} m")
-        st.metric("设计流量 Qmax1", f"{t1_results['Q_max1']:.6f} m³/s")
-
-    with col3:
-        st.write("**搅拌参数**")
-        st.metric("桨叶线速度 v1", f"{t1_results['v1']:.2f} m/s")
-        st.metric("搅拌转速 n1", f"{t1_results['n1']:.2f} r/min")
-        st.metric("搅拌功率 N1", f"{t1_results['N1']:.4f} kW")
-        st.metric("电动机功率 Na1", f"{t1_results['Na1']:.4f} kW")
-        st.metric("电动机选型功率", f"{t1_results['selected_motor_power']} kW")
-
-    # 折流混合区设计结果
-    st.subheader("折流混合区设计结果")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**进水口参数**")
-        st.write(f"进水类型: {t1_results['inlet_type']}")
-        st.write(f"进水口口径: {t1_results['d_inlet']} mm")
-        st.write(f"进水口面积: {t1_results['S_inlet']:.6f} m²")
-        st.write(f"进水流速: {t1_results['v_inlet']:.3f} m/s")
-
-        st.write("**折流区基本参数**")
-        st.write(f"折流区长度: {t1_results['l_baffle']:.3f} m")
-        st.write(f"折流区宽度: {t1_results['b_baffle']:.3f} m")
-        st.write(f"折流区有效高度: {t1_results['h2_baffle']:.3f} m")
-        st.write(f"折流区停留时间: {t1_results['t_baffle']} s")
-
-    with col2:
-        st.write("**折流板参数**")
-        st.write(f"折流板数量: {t1_results['n_baffle']} 层")
-        st.write(f"折流板间距: {t1_results['b1_baffle']:.3f} m")
-        st.write(f"底层距底高度: {t1_results['h_baffle_bottom']:.3f} m")
-        st.write(f"顶部距水面高度: {t1_results['h_baffle_top']:.3f} m")
-
-        st.write("**扰流板参数**")
-        st.write(f"扰流板高度: {t1_results['h_disturb']:.3f} m")
-        st.write(f"下部扰流板数量: {t1_results['n_disturb']} 个")
-        st.write(f"顶部扰流板数量: {t1_results['n_disturb_top']} 个")
-        st.write(f"扰流板总数: {t1_results['n_disturb_total']} 个")
-
-    # 导流筒设计结果
-    st.subheader("导流筒设计结果")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**导流筒基本参数**")
-        st.write(f"导流筒直径: {t1_results['D_d']:.3f} m")
-        st.write(f"导流筒面积: {t1_results['S_d']:.4f} m²")
-        st.write(f"池体面积: {t1_results['S_pool']:.4f} m²")
-        st.write(f"覆盖面积比值: {t1_results['Y_guide']:.3f}")
-        if t1_results['Y_guide_in_range']:
-            st.success("✅ 导流筒覆盖面积比值在正常范围内 (0.15-0.20)")
-        else:
-            st.warning("⚠️ 导流筒覆盖面积比值不在建议范围内")
-
-        st.write(f"絮凝回流比: {t1_results['r_guide']:.2f}")
-        st.write(f"导流筒总高度: {t1_results['h_guide_total']:.3f} m")
-        st.write(f"喇叭口高度: {t1_results['h_horn']:.3f} m")
-
-    with col2:
-        st.write("**底部导流板参数**")
-        st.write(f"导流板高度: {t1_results['h_guide_plate']:.3f} m")
-        st.write(f"导流板宽度: {t1_results['b_guide_plate']:.3f} m")
-        st.write(f"导流板数量: {t1_results['n_guide_plate']} 块")
-
-        st.write("**流速校核**")
-        st.write(f"导流筒内流速: {t1_results['v1_guide']:.3f} m/s")
-        st.write(f"导流筒上缘流速: {t1_results['v2_upper']:.3f} m/s")
-        st.write(f"喇叭口以上流速: {t1_results['v3_above_horn']:.3f} m/s")
-        st.write(f"喇叭口处流速: {t1_results['v4_horn']:.3f} m/s")
-        st.write(f"喇叭口以下流速: {t1_results['v5_below']:.3f} m/s")
-        st.write(f"最大流速差: {t1_results['velocity_diff']:.3f} m/s")
-        if t1_results['velocity_check_ok']:
-            st.success("✅ 各部位流速差异较小，环流效果良好")
-        else:
-            st.warning("⚠️ 各部位流速差异较大，建议优化设计")
-
-    # 复核参数
-    st.subheader("复核参数")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**搅拌系统复核**")
-        st.write(f"S1/S 比值: {t1_results['S1_S_ratio']:.4f}")
-        if t1_results['S1_S_in_range']:
-            st.success("✅ S1/S 比值满足要求 (< 0.25)")
-        else:
-            st.error(f"❌ S1/S 比值不小于 0.25: {t1_results['S1_S_ratio']:.4f}")
-
-        st.write(f"搅拌层数: {t1_results['e']}")
-        st.write(f"桨叶宽度: {t1_results['b']:.3f} m")
-        st.write(f"速度梯度 G1: {t1_results['G1']:.2f} s⁻¹")
-
-        g1_min, g1_max = t1_results['G1_range']
-        if t1_results['G1_in_range']:
-            st.success(f"✅ 速度梯度 G1 在正常范围内 ({g1_min}-{g1_max} s⁻¹)")
-        else:
-            st.error(f"❌ 速度梯度 G1 不在正常范围内: {t1_results['G1']:.2f} s⁻¹")
-
-    with col2:
-        st.write("**几何尺寸复核**")
-        st.write(f"h2/D 比值: {t1_results['h2'] / t1_results['D']:.3f}")
-        st.write(f"桨叶间距: {t1_results['l1_single']:.3f} m")
-
-        # 新增：桨叶间距复核显示
-        st.write("**桨叶间距复核**")
-        st.write(f"下层距池底距离: {t1_results['l1']:.3f} m")
-        st.write(f"桨叶间距: {t1_results['l2']:.3f} m")
-        st.write(f"上层距水面距离: {t1_results['distance_to_surface']:.3f} m")
-
-        dist_min, dist_max = t1_results['distance_surface_range']
-        if t1_results['distance_surface_in_range']:
-            st.success(f"✅ 上层距水面距离在正常范围内 ({dist_min:.3f}-{dist_max:.3f} m)")
-        else:
-            st.warning(
-                f"⚠️ 上层距水面距离不在建议范围内: {t1_results['distance_to_surface']:.3f} m (建议: {dist_min:.3f}-{dist_max:.3f} m)")
-
-    # 结果汇总表格
-    st.subheader("结果汇总")
-    summary_data = {
-        '参数': [
-            '反应池类型', '计算模式', '流量选择', '进水类型',
-            '单套设备处理量 Q0 (m³/d)', '单套设备最大处理量 Qmax (m³/d)', '计算使用流量 (m³/d)',
-            '水力停留时间 t1 (s)', '反应池体积 V1 (m³)', '池体当量直径 D (m)',
-            '池体长度 l (m)', '池体宽度 w (m)', '有效高度 h2 (m)', '池体超高 h1 (m)',
-            '池体总高 h总 (m)', '搅拌桨叶线速度 v1 (m/s)', '搅拌转速 n1 (r/min)',
-            '搅拌直径 d1 (m)', '搅拌功率 N1 (kW)', '电动机功率 Na1 (kW)',
-            '电动机选型功率 (kW)', '速度梯度 G1 (s⁻¹)', '导流筒覆盖面积比值',
-            '絮凝回流比', '最大流速差 (m/s)'
-        ],
-        '数值': [
-            '单级絮凝池', '正向计算', flow_selection, t1_results['inlet_type'],
-            f"{q0:.2f}", f"{q_max:.2f}", f"{flow_rate:.2f}",
-            f"{t1_results['t1']:.2f}", f"{t1_results['V1']:.3f}", f"{t1_results['D']:.3f}",
-            f"{t1_results['l']:.3f}", f"{t1_results['w']:.3f}", f"{t1_results['h2']:.3f}",
-            f"{t1_results['h1']:.3f}", f"{t1_results['h_total']:.3f}", f"{t1_results['v1']:.2f}",
-            f"{t1_results['n1']:.2f}", f"{t1_results['d1']:.3f}", f"{t1_results['N1']:.4f}",
-            f"{t1_results['Na1']:.4f}", f"{t1_results['selected_motor_power']}",
-            f"{t1_results['G1']:.2f}", f"{t1_results['Y_guide']:.3f}",
-            f"{t1_results['r_guide']:.2f}", f"{t1_results['velocity_diff']:.3f}"
-        ]
-    }
-
-    df = pd.DataFrame(summary_data)
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
